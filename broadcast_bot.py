@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import threading
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import (
@@ -8,9 +9,9 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
-    ConversationHandler,
     CommandHandler,
 )
+from telegram.error import RetryAfter
 from telegram.constants import ChatAction
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -24,7 +25,7 @@ try:
 except ValueError:
     raise RuntimeError("CHANNEL_IDS must be comma-separated integers.")
 
-# For tracking message and step
+# For tracking user broadcast state
 user_state = {}
 
 def run_health_server():
@@ -40,7 +41,7 @@ def run_health_server():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Send me the message you want to broadcast.")
     user_state[update.effective_user.id] = {"step": "waiting_for_message"}
-    
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     msg = update.message.text
@@ -52,7 +53,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_state[user_id]["step"] == "waiting_for_message":
         user_state[user_id]["message"] = msg
         user_state[user_id]["step"] = "waiting_for_count"
-        await update.message.reply_text("📢 How many times should I send this message?")
+        await update.message.reply_text("📢 How many times should I send this message? (1-100)")
     
     elif user_state[user_id]["step"] == "waiting_for_count":
         try:
@@ -68,11 +69,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for i in range(count):
             for chat_id in target_chats:
-                try:
-                    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-                    await context.bot.send_message(chat_id=chat_id, text=text)
-                except Exception as e:
-                    print(f"Error sending to {chat_id}: {e}")
+                while True:
+                    try:
+                        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                        await context.bot.send_message(chat_id=chat_id, text=text)
+                        await asyncio.sleep(0.5)  # delay to avoid flood limits
+                        break
+                    except RetryAfter as e:
+                        print(f"Flood limit hit. Sleeping for {e.retry_after} seconds.")
+                        await asyncio.sleep(e.retry_after + 1)
+                    except Exception as e:
+                        print(f"Error sending to {chat_id}: {e}")
+                        break
 
         await update.message.reply_text("✅ Broadcast complete.")
         del user_state[user_id]
