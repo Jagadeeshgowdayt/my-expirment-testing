@@ -1,49 +1,57 @@
-import logging
+
+import os
+import threading
+import json
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# Your bot token from BotFather
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+# Load environment variables\BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_IDS = os.getenv("CHANNEL_IDS", "")  # comma-separated list of channel IDs
 
-# List of channel usernames or chat IDs (must include @ if using usernames)
-CHANNELS = [
-    "@channel_username1",
-    "@channel_username2",
-    "-1001234567890",  # Example of a private channel ID
-]
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable required.")
 
-# Enable logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Parse CHANNEL_IDS into a list of ints
+try:
+    target_chats = [int(cid.strip()) for cid in CHANNEL_IDS.split(",") if cid.strip()]
+except ValueError:
+    raise RuntimeError("CHANNEL_IDS must be comma-separated integers.")
 
-# Message handler to broadcast any received message
-async def broadcast_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
+# Health-check HTTP server on port 8443
+def run_health_server():
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
 
-    msg = update.message.text
-    success = 0
-    fail = 0
+    server = HTTPServer(("0.0.0.0", 8443), HealthHandler)
+    server.serve_forever()
 
-    for channel in CHANNELS:
-        try:
-            await context.bot.send_message(chat_id=channel, text=msg)
-            success += 1
-        except Exception as e:
-            logger.warning(f"Failed to send to {channel}: {e}")
-            fail += 1
-
-    await update.message.reply_text(f"✅ Sent to {success} channel(s), ❌ Failed: {fail}")
-
-# Main entry point
+# Broadcast any private message from the owner (or anyone) to all channels
 def main():
+    # Start health server in a background thread
+    threading.Thread(target=run_health_server, daemon=True).start()
+    print("Health server listening on port 8443")
+
+    # Build bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_handler))
+    async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = update.message.text
+        for chat_id in target_chats:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=text)
+            except Exception as e:
+                print(f"Error sending to {chat_id}: {e}")
+        await update.message.reply_text("✅ Broadcast sent.")
 
-    print("🤖 Bot started...")
+    # Listen for any text in private or group
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast))
+
+    print("Bot is starting…")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-    
