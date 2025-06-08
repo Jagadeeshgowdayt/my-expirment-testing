@@ -1,49 +1,39 @@
-#!/usr/bin/env python3
-import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
 
-# Load configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_IDS = os.getenv("CHANNEL_IDS")  # comma-separated list of chat IDs
+    cm: ChatMemberUpdated = update.chat_member
+    old, new = cm.old_chat_member, cm.new_chat_member
+    # Check if this update is for the bot's status in the chat
+    if new.user.id == context.bot.id and new.status == ChatMember.ADMINISTRATOR:
+        chat = cm.chat
+        chat_id = chat.id
+        if chat_id not in target_chats:
+            # Prompt owner to confirm adding this channel
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"Bot added as admin in channel '{chat.title}' (ID: {chat_id}).\n" +
+                     "Reply with /addchannel {chat_id} to include it in broadcasts."
+            )
 
-if not BOT_TOKEN or not CHANNEL_IDS:
-    raise RuntimeError("Both BOT_TOKEN and CHANNEL_IDS environment variables must be set.")
-
-# Parse target channel IDs into integers
-target_chats = [int(cid.strip()) for cid in CHANNEL_IDS.split(",") if cid.strip()]
-
-# ---------------- Health Check Server ----------------
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-
-def run_health_server():
-    HTTPServer(("0.0.0.0", 8443), HealthHandler).serve_forever()
-
-# ---------------- Telegram Handlers ----------------
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Only accept messages in private chat
-    if update.effective_chat.type != "private":
+async def add_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Owner confirms adding channel
+    if update.effective_chat.type != "private" or update.effective_user.id != OWNER_ID:
         return
-    text = update.message.text
-    for chat_id in target_chats:
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=text)
-        except Exception as e:
-            print(f"Failed to send to {chat_id}: {e}")
-    # Confirm completion to the sender
-    await update.message.reply_text("✅ Broadcast sent to all channels.")
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /addchannel <channel_id>")
+        return
+    try:
+        chat_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid channel ID. It must be an integer.")
+        return
+    if chat_id in target_chats:
+        await update.message.reply_text(f"Channel {chat_id} is already in the broadcast list.")
+        return
+    target_chats.append(chat_id)
+    # Persist to file
+    with open(CHANNEL_FILE, 'w') as f:
+        json.dump(target_chats, f)
+    await update.message.reply_text(f"Channel {chat_id} added to broadcast list.")
 
 
 def main():
@@ -53,10 +43,12 @@ def main():
 
     # Build and run the Telegram bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # Handlers
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, broadcast))
+    app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(CommandHandler("addchannel", add_channel_command))
     print("Bot is starting…")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
