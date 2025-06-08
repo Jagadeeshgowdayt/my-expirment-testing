@@ -5,8 +5,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY broadcast_bot.py .
-
 EXPOSE 8443
+
 HEALTHCHECK --interval=30s --timeout=5s \
   CMD pgrep -f broadcast_bot.py >/dev/null || exit 1
 
