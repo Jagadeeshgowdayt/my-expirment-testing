@@ -1,15 +1,4 @@
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-def run_health_server():
-    HTTPServer(("0.0.0.0", 8443), HealthHandler).serve_forever()
-
-# Broadcast private messages from owner to all channels
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
     text = update.message.text
