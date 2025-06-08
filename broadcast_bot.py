@@ -15,15 +15,32 @@ from telegram.error import RetryAfter
 from telegram.constants import ChatAction
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_IDS = os.getenv("CHANNEL_IDS", "")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable required.")
 
-try:
-    target_chats = [int(cid.strip()) for cid in CHANNEL_IDS.split(",") if cid.strip()]
-except ValueError:
-    raise RuntimeError("CHANNEL_IDS must be comma-separated integers.")
+# Hardcoded list of channel IDs (no need for CHANNEL_IDS env var now)
+target_chats = [
+    -1002325657963,
+    -1002459318891,
+    -1002377542328,
+    -1002375700922,
+    -1002356727250,
+    -1002270458781,
+    -1002332733621,
+    -1002322290432,
+    # duplicate removed once
+    -1002316584285,
+    # duplicate removed once
+    -1002313854344,
+    # duplicate removed once
+    -1002298191534,
+    -1002405499416,
+    -1002334756434,
+    -1002326105229,
+    -1002470097811,
+    -1002400508273
+]
 
 user_state = {}
 
@@ -64,12 +81,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         text = user_state[user_id]["message"]
-        await update.message.reply_text(f"⏳ Sending message {count} times to all channels...\nThis will take approximately {count} minutes.")
+        await update.message.reply_text(f"⏳ Sending message {count} times to all channels...\nThis will take approximately {count * 3} seconds (plus any wait if rate-limited).")
 
-        # Track how many messages successfully sent per channel
         success_counts = {chat_id: 0 for chat_id in target_chats}
 
-        # Send messages with ~60 seconds delay per message per channel
         for i in range(1, count + 1):
             for chat_id in target_chats:
                 while True:
@@ -86,15 +101,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         print(f"Error sending to {chat_id}: {e}")
                         break
 
-            # After sending message i to all channels, wait ~60 seconds before next batch
-            await asyncio.sleep(60)
+            await asyncio.sleep(3)  # 3 seconds delay per batch of messages to all channels
 
-            # Every 10 messages sent, notify user of progress
             if i % 10 == 0 or i == count:
-                # Prepare progress message
                 total_sent = sum(success_counts.values())
-                msg_text = f"✅ Broadcast progress:\nSent {i} out of {count} messages.\n" \
-                           f"Total messages sent to all channels: {total_sent}."
+                msg_text = f"✅ Broadcast progress:\nSent {i} out of {count} messages.\nTotal messages sent to all channels: {total_sent}."
                 try:
                     await context.bot.send_message(chat_id=user_id, text=msg_text)
                 except Exception as e:
@@ -121,4 +132,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
