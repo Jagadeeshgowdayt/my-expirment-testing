@@ -1,12 +1,17 @@
 import os
 import logging
-import asyncio
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-# Logging
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,7 +26,7 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# Environment variables
+# Load environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TARGET_CHATS = os.getenv("TARGET_CHATS", "")
@@ -32,23 +37,25 @@ try:
 except ValueError as e:
     raise RuntimeError(f"Error parsing TARGET_CHATS: {e}")
 
-# State tracking
+# User states
 message_to_send = {}
 confirmed = {}
 
-# Authorization check
+# Helper: Check admin
 def is_authorized(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
+# Handler: Unauthorized
 async def unauthorized(update: Update):
     await update.message.reply_text("❌ You are not authorized.")
 
-# Handlers
+# Handler: /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return await unauthorized(update)
     await update.message.reply_text("Send the message you'd like to broadcast to all channels.")
 
+# Handler: plain message
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -63,8 +70,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Reply with /confirm to continue or /cancel to abort."
         )
     else:
-        await update.message.reply_text("You've already set a message. Use /cancel to reset.")
+        await update.message.reply_text("You already set a message. Use /cancel to reset.")
 
+# Handler: /confirm
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -85,6 +93,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ No message to confirm or already confirmed.")
 
+# Handler: /cancel
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -95,15 +104,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛑 Canceled. You can now send a new message.")
 
 # Main function
-async def main():
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("confirm", confirm))
     app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
