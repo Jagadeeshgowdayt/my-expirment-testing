@@ -1,75 +1,108 @@
 import os
+import logging
 import asyncio
-import threading
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes
-)
-from fastapi import FastAPI
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Read environment variables
-TOKEN = os.getenv("BOT_TOKEN")
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Health check server for Koyeb
+def run_health_server():
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+    HTTPServer(("0.0.0.0", 8443), HealthHandler).serve_forever()
+
+threading.Thread(target=run_health_server, daemon=True).start()
+
+# Environment variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TARGET_CHATS = os.getenv("TARGET_CHATS", "")
-CHAT_IDS = [int(chat_id.strip()) for chat_id in TARGET_CHATS.split(",") if chat_id.strip()]
 
-# FastAPI app for health check
-app_fastapi = FastAPI()
+# Parse target chat IDs
+try:
+    CHAT_IDS = [int(chat_id.strip()) for chat_id in TARGET_CHATS.split(",") if chat_id.strip()]
+except ValueError as e:
+    raise RuntimeError(f"Error parsing TARGET_CHATS: {e}")
 
-@app_fastapi.get("/")
-def root():
-    return {"status": "ok"}
+# State tracking
+message_to_send = {}
+confirmed = {}
 
-def start_fastapi():
-    import uvicorn
-    uvicorn.run(app_fastapi, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+# Authorization check
+def is_authorized(user_id: int) -> bool:
+    return user_id == ADMIN_ID
 
-# Global variable to store custom message
-custom_message = None
+async def unauthorized(update: Update):
+    await update.message.reply_text("❌ You are not authorized.")
 
-# /start command
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Welcome! Use /set <your message> to set the message. Then use /send to broadcast.")
+    if not is_authorized(update.effective_user.id):
+        return await unauthorized(update)
+    await update.message.reply_text("Send the message you'd like to broadcast to all channels.")
 
-# /set command to set a message
-async def set_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global custom_message
-    custom_message = " ".join(context.args)
-    if custom_message:
-        await update.message.reply_text(f"✅ Message set:\n\n{custom_message}")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return await unauthorized(update)
+
+    text = update.message.text.strip()
+    if user_id not in message_to_send:
+        message_to_send[user_id] = text
+        confirmed[user_id] = False
+        await update.message.reply_text(
+            f"🔔 Confirm to send this message 100 times to all channels:\n\n{text}\n\n"
+            "Reply with /confirm to continue or /cancel to abort."
+        )
     else:
-        await update.message.reply_text("⚠️ Please provide a message after /set")
+        await update.message.reply_text("You've already set a message. Use /cancel to reset.")
 
-# /send command to confirm and broadcast
-async def send_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global custom_message
-    if not custom_message:
-        await update.message.reply_text("⚠️ No message set yet. Use /set <your message> first.")
-        return
+async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return await unauthorized(update)
 
-    await update.message.reply_text("✅ Broadcasting will start now...")
+    if user_id in message_to_send and not confirmed.get(user_id):
+        confirmed[user_id] = True
+        await update.message.reply_text("✅ Confirmed. Sending messages...")
+        for _ in range(100):
+            for chat_id in CHAT_IDS:
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=message_to_send[user_id])
+                except Exception as e:
+                    logger.error(f"Failed to send to {chat_id}: {e}")
+        await update.message.reply_text("📨 Done broadcasting!")
+        message_to_send.pop(user_id)
+        confirmed.pop(user_id)
+    else:
+        await update.message.reply_text("❌ No message to confirm or already confirmed.")
 
-    for i in range(100):
-        for chat_id in CHAT_IDS:
-            try:
-                await context.bot.send_message(chat_id=chat_id, text=custom_message)
-                await asyncio.sleep(0.1)  # throttle to avoid rate limits
-            except Exception as e:
-                print(f"❌ Error sending to {chat_id}: {e}")
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return await unauthorized(update)
 
-    await update.message.reply_text("✅ Message sent 100 times to all channels.")
+    message_to_send.pop(user_id, None)
+    confirmed.pop(user_id, None)
+    await update.message.reply_text("🛑 Canceled. You can now send a new message.")
 
 # Main function
 async def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("set", set_msg))
-    app.add_handler(CommandHandler("send", send_msg))
+    app.add_handler(CommandHandler("confirm", confirm))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    # Start FastAPI health check server
-    threading.Thread(target=start_fastapi, daemon=True).start()
-
-    print("🚀 Bot is running...")
     await app.run_polling()
 
 if __name__ == "__main__":
