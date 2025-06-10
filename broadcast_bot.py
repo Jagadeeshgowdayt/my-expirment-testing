@@ -1,72 +1,46 @@
-import logging
 import os
-import ast
+import logging
+import asyncio
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 
-# Set up logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 
-logger = logging.getLogger(__name__)
+TOKEN = os.environ.get("BOT_TOKEN")
+TARGET_CHATS = os.environ.get("TARGET_CHATS")
 
-# Load bot token
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable is not set.")
-
-# Load and parse channel IDs
-raw_chat_ids = os.getenv("TARGET_CHATS")
-if not raw_chat_ids:
-    raise RuntimeError("TARGET_CHATS environment variable is missing.")
-
+# Parse chat IDs as integers
 try:
-    target_chats = ast.literal_eval(raw_chat_ids)
-    if not isinstance(target_chats, list) or not all(isinstance(x, int) for x in target_chats):
-        raise ValueError("TARGET_CHATS must be a list of integers.")
+    CHAT_IDS = [int(chat_id.strip()) for chat_id in TARGET_CHATS.split(",") if chat_id.strip()]
 except Exception as e:
     raise RuntimeError(f"Error parsing TARGET_CHATS: {e}")
 
-
-# /start command handler
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("👋 Hello! Send me a message and I’ll forward it to all connected channels.")
-
-
-# Message handler: forward text to all channels
-async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    if not text:
-        return
-
-    count = 0
-    for chat_id in target_chats:
+# Broadcast function
+async def broadcast(message: str, context: ContextTypes.DEFAULT_TYPE):
+    for chat_id in CHAT_IDS:
         try:
-            await context.bot.send_message(chat_id=chat_id, text=text)
-            count += 1
+            await context.bot.send_message(chat_id=chat_id, text=message)
+            logging.info(f"Sent message to {chat_id}")
         except Exception as e:
-            logger.error(f"❌ Failed to send message to {chat_id}: {e}")
+            logging.error(f"Failed to send to {chat_id}: {e}")
 
-    await update.message.reply_text(f"✅ Broadcast sent to {count} channel(s).")
+# /broadcast command handler
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast your message here")
+        return
+    msg = " ".join(context.args)
+    await broadcast(msg, context)
+    await update.message.reply_text("Broadcast sent!")
 
-
-# Main function to start the bot
+# Main
 async def main():
-    application = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .drop_pending_updates(True)  # Prevents getUpdates conflict
-        .build()
-    )
+    app = ApplicationBuilder().token(TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), forward_message))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
 
-    print("🤖 Bot started and polling...")
-    await application.run_polling()
-
+    logging.info("Bot started.")
+    await app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
