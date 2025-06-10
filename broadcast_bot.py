@@ -1,94 +1,75 @@
 import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes
-)
+import asyncio
+from aiohttp import web
+from telegram import Update, Bot
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_IDS = os.getenv("CHANNEL_IDS", "")
-CONFIRM_USER_ID = int(os.getenv("CONFIRM_USER_ID", "0"))
+# Read from environment
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHANNEL_IDS = os.environ["CHANNEL_IDS"]
 
-if not BOT_TOKEN or not CHANNEL_IDS or CONFIRM_USER_ID == 0:
-    raise RuntimeError("BOT_TOKEN, CHANNEL_IDS, and CONFIRM_USER_ID must be set.")
-
+# Parse comma-separated channel IDs
 CHANNEL_IDS = [int(cid.strip()) for cid in CHANNEL_IDS.split(",") if cid.strip()]
-custom_messages = {}  # Store message per user
+user_message = None  # Store message globally
 
-# /start command
+
+# Health check server to satisfy Koyeb
+async def health_check(request):
+    return web.Response(text="OK")
+
+async def run_health_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8443)
+    await site.start()
+
+
+# Bot logic
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != CONFIRM_USER_ID:
-        await update.message.reply_text("❌ Unauthorized.")
-        return
+    await update.message.reply_text("👋 Send the message you'd like to broadcast to all channels.")
 
+async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global user_message
+    user_message = update.message.text
     await update.message.reply_text(
-        "👋 Send me the message you want to broadcast (just type it)."
+        f"📝 Message saved:\n\n{user_message}\n\nSend /confirm to broadcast this message 100 times."
     )
 
-# Receive custom message
-async def save_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != CONFIRM_USER_ID:
+async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global user_message
+    if not user_message:
+        await update.message.reply_text("❌ No message set yet. Please send a message first.")
         return
 
-    msg = update.message.text.strip()
-    if not msg:
-        await update.message.reply_text("❌ Message is empty.")
-        return
+    await update.message.reply_text("🚀 Sending message to channels 100 times...")
 
-    custom_messages[update.effective_user.id] = msg
+    bot: Bot = context.bot
+    for i in range(100):
+        for chat_id in CHANNEL_IDS:
+            try:
+                await bot.send_message(chat_id=chat_id, text=user_message)
+            except Exception as e:
+                print(f"Error sending to {chat_id}: {e}")
 
-    # Ask confirmation
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Yes", callback_data="confirm_send"),
-            InlineKeyboardButton("❌ No", callback_data="cancel_send")
-        ]
-    ]
-    await update.message.reply_text(
-        f"📝 Message to send *100 times* to *{len(CHANNEL_IDS)} channels*:\n\n{msg}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("✅ Message broadcast completed.")
 
-# Handle button press
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
 
-    await query.answer()
-
-    if user_id != CONFIRM_USER_ID:
-        await query.edit_message_text("❌ You are not authorized.")
-        return
-
-    if query.data == "confirm_send":
-        message = custom_messages.get(user_id)
-        if not message:
-            await query.edit_message_text("⚠️ No message found. Please send it again.")
-            return
-
-        await query.edit_message_text("🚀 Sending messages...")
-
-        sent_count = 0
-        for i in range(100):
-            for channel_id in CHANNEL_IDS:
-                try:
-                    await context.bot.send_message(chat_id=channel_id, text=message)
-                    sent_count += 1
-                except Exception as e:
-                    print(f"Failed to send to {channel_id}: {e}")
-
-        await context.bot.send_message(chat_id=user_id, text=f"✅ Done! Sent {sent_count} messages.")
-    elif query.data == "cancel_send":
-        await query.edit_message_text("❌ Cancelled.")
-
-# Run bot
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# Start everything
+async def main():
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), save_message))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("confirm", confirm))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, capture_message))
 
-    print("🤖 Bot started.")
-    app.run_polling()
+    await asyncio.gather(
+        app.initialize(),
+        run_health_server(),
+        app.start(),
+        app.updater.start_polling()
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
