@@ -17,9 +17,9 @@ from telegram.constants import ChatAction
 # --- CONFIG ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN must be set in env")
+    raise RuntimeError("BOT_TOKEN environment variable required.")
 
-# --- FULL LIST OF 150+ CHANNEL IDs ---
+# --- FULL LIST OF CHANNEL IDs ---
 target_chats = [
     -1002325657963,-1002459318891,-1002377542328,-1002375700922,-1002356727250,
     -1002270458781,-1002332733621,-1002322290432,-1002316584285,-1002313854344,
@@ -60,15 +60,18 @@ def run_health_server():
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
-    HTTPServer(("0.0.0.0", 8443), HealthHandler).serve_forever()
+    server = HTTPServer(("0.0.0.0", 8443), HealthHandler)
+    server.serve_forever()
 
-# --- BROADCAST FLOW ---
+# --- BROADCAST STATE ---
 user_state = {}
 
+# /start handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Send me the message you want to broadcast.")
     user_state[update.effective_user.id] = {"step": "awaiting_message"}
 
+# message handler
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text
@@ -77,14 +80,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Send /start to begin.")
 
     state = user_state[uid]
-    # Step 1: receive the message to broadcast
+    # Step 1: get broadcast text
     if state["step"] == "awaiting_message":
         state["message"] = text
         state["step"] = "awaiting_count"
         return await update.message.reply_text("📢 How many times? (1-100)")
 
-    # Step 2: receive count and perform broadcast
-    count = 0
+    # Step 2: get count and broadcast
     if state["step"] == "awaiting_count":
         try:
             count = int(text)
@@ -95,47 +97,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["step"] = "broadcasting"
         await update.message.reply_text(
             f"⏳ Broadcasting {count}× to {len(target_chats)} channels...\n"
-            f"▷ ~3s delay/batch, progress every 10 sends."
+            "Arranged in batches with 3s delay and progress updates every 10 rounds."
         )
 
         success = 0
         for i in range(1, count + 1):
             for cid in target_chats:
-                try:
-                    # typing indicator
-                    await context.bot.send_chat_action(cid, action=ChatAction.TYPING)
-                    await context.bot.send_message(cid, state["message"])
-                    success += 1
-                except RetryAfter as e:
-                    await asyncio.sleep(e.retry_after + 1)
-                    continue
-                except:
-                    continue
-            # delay between each batch
+                while True:
+                    try:
+                        await context.bot.send_chat_action(cid, action=ChatAction.TYPING)
+                        await context.bot.send_message(cid, state["message"])
+                        success += 1
+                        break
+                    except RetryAfter as e:
+                        await asyncio.sleep(e.retry_after + 1)
+                    except:
+                        break
             await asyncio.sleep(3)
-            # progress update every 10 messages
+
             if i % 10 == 0 or i == count:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"✅ Progress: sent {i}/{count} rounds ({success} total messages)."
+                    text=f"✅ Progress: sent {i}/{count} rounds ({success} messages total)."
                 )
 
-        await update.message.reply_text(f"✅ Done! Total messages sent: {success}")
+        await update.message.reply_text(f"✅ Done! Total messages: {success}")
         del user_state[uid]
 
+# unknown commands
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❓ Use /start to begin broadcasting.")
 
 def main():
+    # start health server
     threading.Thread(target=run_health_server, daemon=True).start()
-    print("Health server on port 8443")
+    print("Health server listening on port 8443")
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # build application with drop_pending_updates to avoid conflicts
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .drop_pending_updates(True)
+        .build()
+    )
+
+    # handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    print("Bot started.")
+    print("Bot is starting…")
     app.run_polling()
 
 if __name__ == "__main__":
