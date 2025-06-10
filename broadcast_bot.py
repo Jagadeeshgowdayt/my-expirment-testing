@@ -1,64 +1,68 @@
 import logging
+import asyncio
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-from telegram.error import Conflict
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+# ✅ Replace this with your real bot token from BotFather
+BOT_TOKEN = "1234567890:ABCDefghIJKlmNOPqrsTUVwxyZ-1234567890"
+
+# Store all chat IDs the bot is added to
+chat_ids = set()
 
 # Enable logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
+logger = logging.getLogger(__name__)
 
-# In-memory store for channels
-channels = set()
 
-# Command: /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! I'm your broadcast bot. Add me to channels and send me a message to broadcast.")
+# ✅ When bot receives any message in a group/channel, store chat ID
+async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id not in chat_ids:
+        chat_ids.add(chat_id)
+        logger.info(f"Registered new chat: {chat_id}")
+    return
 
-# Handler for all messages
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
 
-    # If message from a channel
-    if update.effective_chat.type == "channel":
-        channels.add(update.effective_chat.id)
-        logging.info(f"Added channel: {update.effective_chat.title} ({update.effective_chat.id})")
+# ✅ When you send a message privately to the bot, it will broadcast it to all known chats
+async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type != "private":
+        return  # Only allow broadcasting from private chat
 
-    # Broadcast the message to all known channels
-    for channel_id in channels:
+    text = update.message.text
+    failures = 0
+
+    for cid in chat_ids:
         try:
-            await context.bot.copy_message(
-                chat_id=channel_id,
-                from_chat_id=message.chat_id,
-                message_id=message.message_id
-            )
+            await context.bot.send_message(chat_id=cid, text=text)
         except Exception as e:
-            logging.error(f"Failed to send to channel {channel_id}: {e}")
+            logger.warning(f"Failed to send to {cid}: {e}")
+            failures += 1
 
-# Global error handler to suppress getUpdates Conflict error
-def global_error_handler(update, context):
-    if isinstance(context.error, Conflict):
-        logging.warning("Conflict error suppressed: another polling instance is likely running.")
-        return
-    logging.error("Error while handling update", exc_info=context.error)
+    await update.message.reply_text(
+        f"Broadcast complete. Sent to {len(chat_ids) - failures} chats."
+    )
 
-# Run the bot
+
 def main():
-    TOKEN = "YOUR_BOT_TOKEN"
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    # Listen to any message in group/channel to track chats
+    app.add_handler(MessageHandler(filters.ALL & (~filters.ChatType.PRIVATE), register_chat))
 
-    # Handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
+    # Listen to private messages for broadcasting
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, broadcast_message))
 
-    # Global error handler
-    app.add_error_handler(global_error_handler)
-
-    # Start polling
-    logging.info("Bot started with polling")
+    logger.info("Bot started with polling")
     app.run_polling()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
