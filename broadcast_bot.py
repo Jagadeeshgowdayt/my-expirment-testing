@@ -1,75 +1,76 @@
 import os
 import asyncio
-from aiohttp import web
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import threading
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes
+)
+from fastapi import FastAPI
 
-# Read from environment
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHANNEL_IDS = os.environ["CHANNEL_IDS"]
+# Read environment variables
+TOKEN = os.getenv("BOT_TOKEN")
+TARGET_CHATS = os.getenv("TARGET_CHATS", "")
+CHAT_IDS = [int(chat_id.strip()) for chat_id in TARGET_CHATS.split(",") if chat_id.strip()]
 
-# Parse comma-separated channel IDs
-CHANNEL_IDS = [int(cid.strip()) for cid in CHANNEL_IDS.split(",") if cid.strip()]
-user_message = None  # Store message globally
+# FastAPI app for health check
+app_fastapi = FastAPI()
 
+@app_fastapi.get("/")
+def root():
+    return {"status": "ok"}
 
-# Health check server to satisfy Koyeb
-async def health_check(request):
-    return web.Response(text="OK")
+def start_fastapi():
+    import uvicorn
+    uvicorn.run(app_fastapi, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
-async def run_health_server():
-    app = web.Application()
-    app.router.add_get("/", health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8443)
-    await site.start()
+# Global variable to store custom message
+custom_message = None
 
-
-# Bot logic
+# /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Send the message you'd like to broadcast to all channels.")
+    await update.message.reply_text("Welcome! Use /set <your message> to set the message. Then use /send to broadcast.")
 
-async def capture_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global user_message
-    user_message = update.message.text
-    await update.message.reply_text(
-        f"📝 Message saved:\n\n{user_message}\n\nSend /confirm to broadcast this message 100 times."
-    )
+# /set command to set a message
+async def set_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global custom_message
+    custom_message = " ".join(context.args)
+    if custom_message:
+        await update.message.reply_text(f"✅ Message set:\n\n{custom_message}")
+    else:
+        await update.message.reply_text("⚠️ Please provide a message after /set")
 
-async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global user_message
-    if not user_message:
-        await update.message.reply_text("❌ No message set yet. Please send a message first.")
+# /send command to confirm and broadcast
+async def send_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global custom_message
+    if not custom_message:
+        await update.message.reply_text("⚠️ No message set yet. Use /set <your message> first.")
         return
 
-    await update.message.reply_text("🚀 Sending message to channels 100 times...")
+    await update.message.reply_text("✅ Broadcasting will start now...")
 
-    bot: Bot = context.bot
     for i in range(100):
-        for chat_id in CHANNEL_IDS:
+        for chat_id in CHAT_IDS:
             try:
-                await bot.send_message(chat_id=chat_id, text=user_message)
+                await context.bot.send_message(chat_id=chat_id, text=custom_message)
+                await asyncio.sleep(0.1)  # throttle to avoid rate limits
             except Exception as e:
-                print(f"Error sending to {chat_id}: {e}")
+                print(f"❌ Error sending to {chat_id}: {e}")
 
-    await update.message.reply_text("✅ Message broadcast completed.")
+    await update.message.reply_text("✅ Message sent 100 times to all channels.")
 
-
-# Start everything
+# Main function
 async def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("confirm", confirm))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, capture_message))
+    app.add_handler(CommandHandler("set", set_msg))
+    app.add_handler(CommandHandler("send", send_msg))
 
-    await asyncio.gather(
-        app.initialize(),
-        run_health_server(),
-        app.start(),
-        app.updater.start_polling()
-    )
+    # Start FastAPI health check server
+    threading.Thread(target=start_fastapi, daemon=True).start()
+
+    print("🚀 Bot is running...")
+    await app.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
